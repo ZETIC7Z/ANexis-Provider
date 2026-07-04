@@ -1,0 +1,9 @@
+{
+  "info": "Pre-configured credentials. Change the password after first login if desired.",
+  "users": [
+    {
+      "username": "admin",
+      "hash": "c9c5a416ccf6485800387ddda659248c:5c08db7956bf7633cbee82bae0fcdb43cfe939f86188a01922e3b214cafd184dd5a803d26b9504a709479b218fa0b08d06b2a5fb3a1c2f935a5c8e6878a5b797"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+version: '3.9'
+
+services:
+  tmdb-embed-api:
+    build: .
+    container_name: tmdb-embed-api
+    env_file: .env
+    environment:
+      - API_PORT=8787
+      - BIND_HOST=0.0.0.0
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./utils/user-config.json:/app/utils/user-config.json
+      - ./utils/auth-users.json:/app/utils/auth-users.json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8787/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

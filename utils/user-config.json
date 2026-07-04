@@ -1,0 +1,17 @@
+{
+  "port": 8787,
+  "minQualitiesRaw": "all",
+  "excludeCodecsRaw": "{\"excludeDV\":false,\"excludeHDR\":false}",
+  "febboxCookies": [
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3ODMxNjY3MTksIm5iZiI6MTc4MzE2NjcxOSwiZXhwIjoxODE0MjcwNzM5LCJkYXRhIjp7InVpZCI6MTIzODI3MSwidG9rZW4iOiJmNGY0ZWUzNmEzOWUwYzgxZDM3NDNlMmNjYmIxMDM4MSJ9fQ.XqqxlZRvT_5WRAzU3_LjhoUWls0kvCwFTkatkptD1w4"
+  ],
+  "enableProxy": true,
+  "disableCache": false,
+  "disableUrlValidation": false,
+  "disable4khdhubUrlValidation": false,
+  "tmdbApiKeys": [
+    "39e5d4874c102b0a9b61639c81b9bda1",
+    "4ee9728210417b975a587e71f1b8e573"
+  ],
+  "configVersion": 1
+}
