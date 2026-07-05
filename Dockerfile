@@ -5,11 +5,9 @@ WORKDIR /app
 
 # Install only production dependencies first (leveraging cache)
 COPY package.json package-lock.json ./
-# Using npm install instead of npm ci because lock file appears out-of-sync
-# If you later regenerate lock (npm install locally) you can revert to npm ci for reproducibility
 RUN npm install --omit=dev
 
-# Copy only required source (avoid sending screenshots, node_modules already installed)
+# Copy only required source
 COPY apiServer.js ./
 COPY providers ./providers
 COPY proxy ./proxy
@@ -27,7 +25,7 @@ ENV NODE_ENV=production \
     APP_VERSION=${VERSION}
 
 # Create non-root user
-RUN addgroup -S app && adduser -S app -G app
+RUN apk add --no-cache ffmpeg && addgroup -S app && adduser -S app -G app
 
 # Copy node_modules from build and necessary source
 COPY --from=build /app/node_modules ./node_modules
@@ -39,10 +37,10 @@ COPY --from=build /app/utils ./utils
 COPY --from=build /app/package.json ./
 COPY --from=build /app/README.md ./
 
-# Expose port (documentational; runtime can override)
+# Expose port
 EXPOSE 8787
 
-# Ensure runtime user owns app directory for writes (overrides, restart marker)
+# Ensure runtime user owns app directory
 RUN chown -R app:app /app
 USER app
 
@@ -53,7 +51,7 @@ LABEL org.opencontainers.image.title="TMDB Embed API" \
     org.opencontainers.image.source="https://github.com/Inside4ndroid/TMDB-Embed-API" \
     org.opencontainers.image.licenses="MIT"
 
-# Healthcheck (simple)
+# Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD wget -qO- http://localhost:${API_PORT:-8787}/api/health || exit 1
 
 CMD ["node","apiServer.js"]

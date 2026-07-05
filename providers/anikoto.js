@@ -5,7 +5,7 @@
 const axios = require('axios');
 const { getTmdbApiKey } = require('../utils/tmdbKey');
 
-const API_BASE = 'https://anikototvapi.vercel.app/api';
+const API_BASE = 'https://nexus-anime-tau.vercel.app/api';
 
 const AXIOS_OPTS = {
     timeout: 10000,

@@ -10,14 +10,14 @@ const providerFunctionMap = {
   'Showbox.js': 'getStreamsFromTmdbId',
   '4khdhub.js': 'get4KHDHubStreams',
   'vixsrc.js': 'getVixsrcStreams',
-  'videasy.js': 'getVideasyStreams',
   'vidlink.js': 'getVidlinkStreams',
-  'lordflix.js': 'getLordflixStreams',
   'notorrent.js': 'getNotorrentStreams',
   'dahmermovies.js': 'getDahmermoviesStreams',
   // New providers
   'vsembed.js': 'getVsembedStreams',
   'anikoto.js': 'getAnikotoStreams',
+  'moviebox.js': 'getMovieboxStreams',
+  'anikai.js': 'getAnikaiStreams',
 };
 
 // Stats for debug endpoint

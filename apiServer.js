@@ -377,8 +377,19 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     let streams = results.flat();
     streams = applyFilters(streams, 'aggregate', config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
+    const serverUrl = `${req.protocol}://${req.get('host')}`;
+    streams = streams.map(s => {
+      if (s && typeof s === 'object' && s.url) {
+        const isMkv = /\.mkv/i.test(s.url) || s.url.includes('.mkv');
+        if (isMkv) {
+          console.log(`[api] wrapping MKV stream URL to HLS remux: ${s.url}`);
+          s.url = `${serverUrl}/api/remux/hls/index.m3u8?url=${encodeURIComponent(s.url)}`;
+          s.type = 'hls';
+        }
+      }
+      return s;
+    });
     if (config.enableProxy) {
-      const serverUrl = `${req.protocol}://${req.get('host')}`;
       streams = processStreamsForProxy(streams, serverUrl);
       // Omit original headers when proxying to avoid leaking upstream requirements
       streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
@@ -409,8 +420,19 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     const providerTimings = { [prov.name]: Date.now()-t0 };
     streams = applyFilters(streams, prov.name, config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
+    const serverUrl = `${req.protocol}://${req.get('host')}`;
+    streams = streams.map(s => {
+      if (s && typeof s === 'object' && s.url) {
+        const isMkv = /\.mkv/i.test(s.url) || s.url.includes('.mkv');
+        if (isMkv) {
+          console.log(`[api] wrapping MKV stream URL to HLS remux: ${s.url}`);
+          s.url = `${serverUrl}/api/remux/hls/index.m3u8?url=${encodeURIComponent(s.url)}`;
+          s.type = 'hls';
+        }
+      }
+      return s;
+    });
     if (config.enableProxy) {
-      const serverUrl = `${req.protocol}://${req.get('host')}`;
       streams = processStreamsForProxy(streams, serverUrl);
       streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
     }
@@ -419,6 +441,105 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     metrics.lastError = e.message;
     res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message });
   }
+});
+
+// On-the-fly remuxer using FFmpeg to play MKV files as HLS on web players
+const { spawn } = require('child_process');
+
+function getDuration(url) {
+  return new Promise((resolve, reject) => {
+    const ffprobe = spawn('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      url
+    ]);
+    let output = '';
+    ffprobe.stdout.on('data', data => { output += data.toString(); });
+    ffprobe.on('error', err => { reject(err); });
+    ffprobe.on('close', code => {
+      if (code === 0) {
+        resolve(parseFloat(output.trim()) || 1440); // default to 24 mins if NaN
+      } else {
+        reject(new Error(`ffprobe exited with code ${code}`));
+      }
+    });
+  });
+}
+
+app.get('/api/remux/hls/index.m3u8', async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).send('Missing url parameter');
+
+  console.log(`[remux-hls] Generating playlist for: ${url}`);
+  try {
+    const duration = await getDuration(url);
+    const segmentDuration = 10;
+    const numSegments = Math.ceil(duration / segmentDuration);
+
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-cache');
+
+    let m3u8 = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${segmentDuration}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
+    for (let i = 0; i < numSegments; i++) {
+      const start = i * segmentDuration;
+      const remains = duration - start;
+      const durationOfSegment = Math.min(segmentDuration, remains);
+      m3u8 += `#EXTINF:${durationOfSegment.toFixed(3)},\n`;
+      m3u8 += `/api/remux/hls/segment.ts?url=${encodeURIComponent(url)}&start=${start}&duration=${durationOfSegment}\n`;
+    }
+    m3u8 += '#EXT-X-ENDLIST\n';
+    res.send(m3u8);
+  } catch (e) {
+    console.error('[remux-hls] Error generating playlist, serving fallback 24m playlist:', e.message);
+    // Fallback: serve a static 24 minute playlist in case probing fails
+    const segmentDuration = 10;
+    const duration = 1440;
+    const numSegments = 144;
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    let m3u8 = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${segmentDuration}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
+    for (let i = 0; i < numSegments; i++) {
+      const start = i * segmentDuration;
+      m3u8 += `#EXTINF:${segmentDuration}.000,\n`;
+      m3u8 += `/api/remux/hls/segment.ts?url=${encodeURIComponent(url)}&start=${start}&duration=${segmentDuration}\n`;
+    }
+    m3u8 += '#EXT-X-ENDLIST\n';
+    res.send(m3u8);
+  }
+});
+
+app.get('/api/remux/hls/segment.ts', (req, res) => {
+  const { url, start, duration } = req.query;
+  if (!url || start === undefined || duration === undefined) {
+    return res.status(400).send('Missing parameters');
+  }
+
+  res.setHeader('Content-Type', 'video/mp2t');
+
+  //ss before -i for super-fast keyframe seek, copy video, transcode audio to aac for browser compatibility
+  const ffmpeg = spawn('ffmpeg', [
+    '-ss', start,
+    '-i', url,
+    '-t', duration,
+    '-c:v', 'copy',
+    '-c:a', 'aac',
+    '-b:a', '128k',
+    '-ac', '2',
+    '-map', '0:v:0',
+    '-map', '0:a:0',
+    '-f', 'mpegts',
+    'pipe:1'
+  ]);
+
+  ffmpeg.stdout.pipe(res);
+
+  ffmpeg.on('error', (err) => {
+    console.error('[remux-hls] FFmpeg segment error:', err.message);
+  });
+
+  req.on('close', () => {
+    ffmpeg.kill('SIGKILL');
+  });
 });
 
 const PORT = config.port;

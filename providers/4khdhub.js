@@ -190,7 +190,7 @@ function getDomains() {
 
     return makeRequest(DOMAINS_URL)
         .then(response => {
-            cachedDomains = JSON.parse(response.body);
+            cachedDomains = typeof response.body === 'string' ? JSON.parse(response.body) : response.body;
             return cachedDomains;
         })
         .catch(error => {
@@ -1516,7 +1516,7 @@ async function getTMDBDetails(tmdbId, mediaType) {
     try {
         console.log(`[4KHDHub] Fetching ${mediaType} details for TMDB ID: ${tmdbId}`);
         const response = await makeRequest(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}`);
-        const data = JSON.parse(response.body);
+        const data = typeof response.body === 'string' ? JSON.parse(response.body) : response.body;
 
         if (mediaType === 'movie') {
             return {

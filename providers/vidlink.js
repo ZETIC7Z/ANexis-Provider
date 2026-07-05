@@ -27,21 +27,51 @@ async function getVidlinkStreams(tmdbId, mediaType = 'movie', seasonNum = null, 
 
         const apiRes = await axios.get(apiUrl, { headers: VIDLINK_HEADERS, timeout: 8000 });
 
-        const playlist = apiRes.data && apiRes.data.stream && apiRes.data.stream.playlist;
-        if (!playlist) {
-            console.log('[Vidlink] No playlist URL in response.');
+        const qualities = apiRes.data && apiRes.data.stream && apiRes.data.stream.qualities;
+        if (!qualities) {
+            console.log('[Vidlink] No qualities found in response.');
             return [];
         }
 
-        console.log(`[Vidlink] Got stream.`);
-        return [{
-            name: 'Vidlink',
-            title: 'Vidlink',
-            url: playlist,
-            quality: 'Auto',
-            provider: 'Vidlink',
-            headers: { 'Referer': 'https://vidlink.pro' }
-        }];
+        const results = [];
+        
+        // Extract MP4 streams from qualities
+        for (const [res, streamInfo] of Object.entries(qualities)) {
+            if (streamInfo && streamInfo.url) {
+                results.push({
+                    server: `Vidlink ${res}p`,
+                    title: `Vidlink ${res}p`,
+                    url: streamInfo.url,
+                    quality: `${res}p`,
+                    type: 'mp4',
+                    provider: 'vidlink',
+                    headers: {
+                        'Referer': 'https://vidlink.pro/',
+                        'User-Agent': VIDLINK_HEADERS['User-Agent']
+                    }
+                });
+            }
+        }
+
+        // Check for DASH alternates
+        const alternates = apiRes.data && apiRes.data.stream && apiRes.data.stream.alternates;
+        if (alternates && alternates.dash && alternates.dash.playlist) {
+            results.push({
+                server: 'Vidlink DASH (Auto)',
+                title: 'Vidlink DASH (Auto)',
+                url: alternates.dash.playlist,
+                quality: 'Auto',
+                type: 'dash',
+                provider: 'vidlink',
+                headers: {
+                    'Referer': 'https://vidlink.pro/',
+                    'User-Agent': VIDLINK_HEADERS['User-Agent']
+                }
+            });
+        }
+
+        console.log(`[Vidlink] Got ${results.length} stream(s).`);
+        return results;
     } catch (err) {
         console.error(`[Vidlink] Error: ${err.message}`);
         return [];

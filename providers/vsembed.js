@@ -1,140 +1,189 @@
 /**
- * vsembed.js - VidSrc (vsembed.ru) provider
- * Flow: embed page → iframe src → player page → extract m3u8
- * Domain: vsembed.ru (VidSrc mirror, works with TMDB IDs)
+ * vsembed.js - VsEmbed/Vidsrc provider
+ *
+ * vsembed.ru is a server-selector page. The real player URL is encoded
+ * as a base64 `data-hash` attribute on a ".server" div. We decode the first
+ * hash to get a sub-player URL, fetch that page, and extract the m3u8.
+ *
+ * Flow:
+ *  1. Fetch /embed/movie/{id} → parse .server[data-hash] elements
+ *  2. Base64-decode the hash → get sub-player URL (e.g. 2embed, superembed)
+ *  3. Fetch the sub-player URL → extract m3u8 from its HTML/API
  */
 const axios = require('axios');
 
-const BASE_URL = 'https://vsembed.ru';
+const PROVIDERS = [
+    'https://vsembed.ru',
+    'https://vsembed.su',
+    'https://vidsrcme.ru',
+];
+
 const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,*/*',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Referer': BASE_URL + '/'
 };
 
-async function getPage(url, referer) {
+function buildEmbedUrl(domain, tmdbId, mediaType, seasonNum, episodeNum) {
+    if (mediaType === 'tv') {
+        return `${domain}/embed/tv?tmdb=${tmdbId}&season=${seasonNum}&episode=${episodeNum}`;
+    }
+    return `${domain}/embed/movie/${tmdbId}`;
+}
+
+async function fetchHtml(url, referer) {
     try {
-        const res = await axios.get(url, {
-            headers: { ...HEADERS, Referer: referer || BASE_URL + '/' },
-            timeout: 10000,
-            responseType: 'text'
+        const resp = await axios.get(url, {
+            headers: { ...HEADERS, 'Referer': referer || url },
+            timeout: 15000,
+            responseType: 'text',
         });
-        if (res.status !== 200) return null;
-        return res.data;
-    } catch {
+        return resp.status === 200 ? resp.data : null;
+    } catch (e) {
         return null;
     }
 }
 
-function extractIframeSrc(html) {
-    const m = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
-    if (!m) return null;
-    let src = m[1];
-    if (src.startsWith('//')) src = 'https:' + src;
-    return src;
+/**
+ * Parse .server[data-hash] divs and decode the hashes.
+ * The hash is a double-base64 encoded URL (sometimes with extra layers).
+ */
+function parseServerHashes(html) {
+    const servers = [];
+    // data-hash values span multiple lines in the HTML — use [\s\S] to capture across newlines
+    const serverRegex = /class="server"[\s\S]*?data-hash="([\s\S]*?)"/g;
+    let match;
+    while ((match = serverRegex.exec(html)) !== null) {
+        const rawHash = match[1].replace(/\s/g, ''); // strip all whitespace/newlines
+        try {
+            // First base64 decode
+            const decoded1 = Buffer.from(rawHash, 'base64').toString('utf-8');
+            
+            // Format is: "md5hash:base64encodedUrl"
+            // Split on the first colon to get the base64 URL part
+            const colonIdx = decoded1.indexOf(':');
+            if (colonIdx === -1) continue;
+            
+            const base64Url = decoded1.substring(colonIdx + 1).replace(/\s/g, '');
+            
+            // Second base64 decode to get the actual URL
+            const url = Buffer.from(base64Url, 'base64').toString('utf-8');
+            console.log(`[Vsembed] Decoded server URL: ${url.substring(0, 80)}`);
+            
+            if (url && (url.startsWith('http') || url.includes('embed') || url.includes('/'))) {
+                servers.push(url.trim());
+            }
+        } catch (e) {
+            console.warn('[Vsembed] Hash decode error:', e.message);
+        }
+    }
+    return servers;
 }
 
-function extractM3u8(html) {
-    // Pattern: file: "...m3u8..." or file:"..." with domain placeholders
-    const fileMatch = html.match(/file\s*:\s*["']([^"']+)["']/i);
-    if (fileMatch) {
-        let url = fileMatch[1];
-        // Handle domain placeholders used by cloudnestra
-        const domains = {
-            '{v1}': 'neonhorizonworkshops.com',
-            '{v2}': 'wanderlynest.com',
-            '{v3}': 'orchidpixelgardens.com',
-            '{v4}': 'cloudnestra.com'
-        };
-        for (const [ph, domain] of Object.entries(domains)) {
-            url = url.replace(ph, domain);
-        }
-        // Take first URL if multiple separated by " or "
-        url = url.split(/\s+or\s+/i)[0].trim();
-        if (url.includes('m3u8') || url.includes('stream') || url.startsWith('http')) return url;
+/**
+ * Try to extract m3u8 URL from a sub-player page HTML.
+ * Common patterns used by 2embed, superembed, etc.
+ */
+function extractM3u8FromHtml(html, baseUrl) {
+    if (!html) return null;
+
+    // Direct m3u8 URL
+    const directM3u8 = html.match(/['"`](https?:\/\/[^'"`\s]+\.m3u8[^'"`\s]*)['"` ]/);
+    if (directM3u8) return directM3u8[1];
+
+    // file: "url" pattern (JW Player / Video.js style)
+    const filePattern = html.match(/(?:file|src)\s*[=:]\s*['"`](https?:\/\/[^'"`]+)['"` ]/);
+    if (filePattern && (filePattern[1].includes('m3u8') || filePattern[1].includes('stream'))) {
+        return filePattern[1];
     }
 
-    // Direct m3u8 URL in body
-    const m3uMatch = html.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/);
-    if (m3uMatch) return m3uMatch[0];
+    // source.src pattern
+    const sourceSrc = html.match(/source\.src\s*=\s*['"`](https?:\/\/[^'"`]+)['"` ]/);
+    if (sourceSrc) return sourceSrc[1];
 
     return null;
 }
 
-function extractRelSrc(html, baseUrl) {
-    const m = html.match(/src\s*:\s*["']([^"']+)["']/i);
-    if (!m) return null;
-    try {
-        return new URL(m[1], baseUrl).href;
-    } catch {
+/**
+ * Some sub-players (like 2embed) have an API endpoint that returns stream JSON.
+ * e.g. https://www.2embed.cc/embedtv/movie?id={tmdbId}
+ * Try fetching common API patterns.
+ */
+async function trySubPlayerApi(subPlayerUrl, tmdbId, mediaType) {
+    // 2embed pattern: fetch /api/getVideoSource?id=...
+    if (subPlayerUrl.includes('2embed')) {
+        try {
+            const apiUrl = `https://www.2embed.cc/embedtv/${mediaType === 'tv' ? 'tv' : 'movie'}?id=${tmdbId}`;
+            const html = await fetchHtml(apiUrl, 'https://www.2embed.cc/');
+            if (html) {
+                const m3u8 = extractM3u8FromHtml(html, 'https://www.2embed.cc/');
+                if (m3u8) return m3u8;
+            }
+        } catch {}
+    }
+
+    // Generic: just fetch the sub-player URL and try to extract m3u8
+    const html = await fetchHtml(subPlayerUrl, subPlayerUrl);
+    if (html) {
+        const m3u8 = extractM3u8FromHtml(html, subPlayerUrl);
+        if (m3u8) return m3u8;
+    }
+    return null;
+}
+
+async function tryScrapeProvider(domain, tmdbId, mediaType, seasonNum, episodeNum) {
+    const embedUrl = buildEmbedUrl(domain, tmdbId, mediaType, seasonNum, episodeNum);
+    console.log(`[Vsembed] Fetching selector page: ${embedUrl}`);
+
+    const html = await fetchHtml(embedUrl, domain + '/');
+    if (!html) {
+        console.warn(`[Vsembed] No HTML from ${domain}`);
         return null;
     }
+
+    // Parse server hashes
+    const subPlayers = parseServerHashes(html);
+    if (subPlayers.length === 0) {
+        console.warn(`[Vsembed] No server hashes found on ${domain}`);
+        return null;
+    }
+
+    console.log(`[Vsembed] Found ${subPlayers.length} sub-players on ${domain}`);
+
+    // Try each sub-player in order
+    for (const subUrl of subPlayers.slice(0, 3)) {
+        console.log(`[Vsembed] Trying sub-player: ${subUrl}`);
+        const m3u8 = await trySubPlayerApi(subUrl, tmdbId, mediaType);
+        if (m3u8) {
+            console.log(`[Vsembed] ✅ Found m3u8: ${m3u8}`);
+            return { domain, m3u8Url: m3u8, subtitles: [] };
+        }
+    }
+
+    console.warn(`[Vsembed] All sub-players failed on ${domain}`);
+    return null;
 }
 
 async function getVsembedStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
-    console.log(`[VsEmbed] Fetching for TMDB ${tmdbId} type=${mediaType}`);
-    try {
-        // Step 1: Get embed page
-        const embedUrl = mediaType === 'movie'
-            ? `${BASE_URL}/embed/movie?tmdb=${tmdbId}`
-            : `${BASE_URL}/embed/tv?tmdb=${tmdbId}&season=${seasonNum}&episode=${episodeNum}`;
+    console.log(`[Vsembed] Fetching for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
 
-        const embedHtml = await getPage(embedUrl, BASE_URL + '/');
-        if (!embedHtml) {
-            console.log('[VsEmbed] Failed to fetch embed page');
-            return [];
+    for (const domain of PROVIDERS) {
+        const result = await tryScrapeProvider(domain, tmdbId, mediaType, seasonNum, episodeNum);
+        if (result) {
+            return [{
+                server: 'VsEmbed',
+                title: 'VsEmbed (Auto)',
+                quality: 'Auto',
+                url: result.m3u8Url,
+                type: 'hls',
+                provider: 'vsembed',
+                subtitles: result.subtitles,
+            }];
         }
-
-        // Step 2: Extract iframe src (player host)
-        const iframeSrc = extractIframeSrc(embedHtml);
-        if (!iframeSrc) {
-            console.log('[VsEmbed] No iframe found in embed page');
-            return [];
-        }
-        console.log(`[VsEmbed] Step 2 iframe: ${iframeSrc.slice(0, 80)}`);
-
-        // Step 3: Fetch iframe/player page
-        const playerHtml = await getPage(iframeSrc, embedUrl);
-        if (!playerHtml) {
-            console.log('[VsEmbed] Failed to fetch player page');
-            return [];
-        }
-
-        // Step 4: Try to find m3u8 directly
-        let streamUrl = extractM3u8(playerHtml);
-
-        // Step 5: If not found, look for another src: 'url' redirect
-        if (!streamUrl) {
-            const thirdUrl = extractRelSrc(playerHtml, iframeSrc);
-            if (thirdUrl) {
-                console.log(`[VsEmbed] Step 5 third url: ${thirdUrl.slice(0, 80)}`);
-                const thirdHtml = await getPage(thirdUrl, iframeSrc);
-                if (thirdHtml) streamUrl = extractM3u8(thirdHtml);
-            }
-        }
-
-        if (!streamUrl) {
-            console.log('[VsEmbed] No m3u8 found');
-            return [];
-        }
-
-        console.log(`[VsEmbed] Found stream: ${streamUrl.slice(0, 80)}`);
-        return [{
-            name: 'VidSrc',
-            title: 'VidSrc (Auto)',
-            url: streamUrl,
-            quality: 'Auto',
-            provider: 'VidSrc',
-            headers: {
-                'Referer': 'https://cloudnestra.com/',
-                'Origin': 'https://cloudnestra.com'
-            }
-        }];
-    } catch (err) {
-        console.error(`[VsEmbed] Error: ${err.message}`);
-        return [];
     }
+
+    console.error('[Vsembed] All providers failed.');
+    return [];
 }
 
 module.exports = { getVsembedStreams };
