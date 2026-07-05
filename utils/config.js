@@ -111,7 +111,7 @@ function normalizeConfig(base) {
   if (cfg.disableCache === undefined) cfg.disableCache = false;
   if (cfg.enablePStreamApi === undefined) cfg.enablePStreamApi = true;
   if (cfg.enableProxy === undefined) {
-    cfg.enableProxy = !!process.env.SPACE_ID; // default true on Hugging Face Spaces
+    cfg.enableProxy = true; // ALWAYS default to true to match Hugging Face Space behavior
   }
   // Proxy features removed; always use direct connections
   if (cfg.disableUrlValidation === undefined) cfg.disableUrlValidation = false;

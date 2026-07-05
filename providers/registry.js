@@ -18,6 +18,10 @@ const providerFunctionMap = {
   'anikoto.js': 'getAnikotoStreams',
   'moviebox.js': 'getMovieboxStreams',
   'anikai.js': 'getAnikaiStreams',
+  'videasy.js': 'getVideasyStreams',
+  'cinesrc.js': 'getCinesrcStreams',
+  'vidcore.js': 'getVidcoreStreams',
+  'vidfast.js': 'getVidfastStreams',
 };
 
 // Stats for debug endpoint

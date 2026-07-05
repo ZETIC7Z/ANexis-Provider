@@ -378,17 +378,6 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     streams = applyFilters(streams, 'aggregate', config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
     const serverUrl = `${req.protocol}://${req.get('host')}`;
-    streams = streams.map(s => {
-      if (s && typeof s === 'object' && s.url) {
-        const isMkv = /\.mkv/i.test(s.url) || s.url.includes('.mkv');
-        if (isMkv) {
-          console.log(`[api] wrapping MKV stream URL to HLS remux: ${s.url}`);
-          s.url = `${serverUrl}/api/remux/hls/index.m3u8?url=${encodeURIComponent(s.url)}`;
-          s.type = 'hls';
-        }
-      }
-      return s;
-    });
     if (config.enableProxy) {
       streams = processStreamsForProxy(streams, serverUrl);
       // Omit original headers when proxying to avoid leaking upstream requirements
@@ -421,17 +410,6 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     streams = applyFilters(streams, prov.name, config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
     const serverUrl = `${req.protocol}://${req.get('host')}`;
-    streams = streams.map(s => {
-      if (s && typeof s === 'object' && s.url) {
-        const isMkv = /\.mkv/i.test(s.url) || s.url.includes('.mkv');
-        if (isMkv) {
-          console.log(`[api] wrapping MKV stream URL to HLS remux: ${s.url}`);
-          s.url = `${serverUrl}/api/remux/hls/index.m3u8?url=${encodeURIComponent(s.url)}`;
-          s.type = 'hls';
-        }
-      }
-      return s;
-    });
     if (config.enableProxy) {
       streams = processStreamsForProxy(streams, serverUrl);
       streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
@@ -446,14 +424,25 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
 // On-the-fly remuxer using FFmpeg to play MKV files as HLS on web players
 const { spawn } = require('child_process');
 
-function getDuration(url) {
+function getDuration(url, headersObj = {}) {
   return new Promise((resolve, reject) => {
-    const ffprobe = spawn('ffprobe', [
+    let headersStr = '';
+    for (const [key, value] of Object.entries(headersObj)) {
+      headersStr += `${key}: ${value}\r\n`;
+    }
+
+    const args = [
       '-v', 'error',
       '-show_entries', 'format=duration',
-      '-of', 'default=noprint_wrappers=1:nokey=1',
-      url
-    ]);
+      '-of', 'default=noprint_wrappers=1:nokey=1'
+    ];
+
+    if (headersStr) {
+      args.push('-headers', headersStr);
+    }
+    args.push(url);
+
+    const ffprobe = spawn('ffprobe', args);
     let output = '';
     ffprobe.stdout.on('data', data => { output += data.toString(); });
     ffprobe.on('error', err => { reject(err); });
@@ -467,80 +456,153 @@ function getDuration(url) {
   });
 }
 
+const fs = require('fs');
+const crypto = require('crypto');
+const activeRemuxes = new Map();
+
+// Cleanup old cache folders periodically
+setInterval(() => {
+  const cacheRoot = '/tmp/hls_cache';
+  if (!fs.existsSync(cacheRoot)) return;
+  fs.readdirSync(cacheRoot).forEach(dir => {
+    const dirPath = path.join(cacheRoot, dir);
+    try {
+      const stats = fs.statSync(dirPath);
+      if (Date.now() - stats.mtimeMs > 2 * 60 * 60 * 1000) {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+        console.log(`[remux-local-hls] Cleaned up expired cache: ${dir}`);
+      }
+    } catch (e) {
+      console.error(`[remux-local-hls] Error cleaning ${dir}:`, e.message);
+    }
+  });
+}, 30 * 60 * 1000);
+
 app.get('/api/remux/hls/index.m3u8', async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).send('Missing url parameter');
 
-  console.log(`[remux-hls] Generating playlist for: ${url}`);
-  try {
-    const duration = await getDuration(url);
-    const segmentDuration = 10;
-    const numSegments = Math.ceil(duration / segmentDuration);
+  const headers = req.query.headers || '';
+  const hash = crypto.createHash('md5').update(url).digest('hex');
+  const outDir = path.join('/tmp', 'hls_cache', hash);
+  const playlistPath = path.join(outDir, 'index.m3u8');
 
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Cache-Control', 'no-cache');
-
-    let m3u8 = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${segmentDuration}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
-    for (let i = 0; i < numSegments; i++) {
-      const start = i * segmentDuration;
-      const remains = duration - start;
-      const durationOfSegment = Math.min(segmentDuration, remains);
-      m3u8 += `#EXTINF:${durationOfSegment.toFixed(3)},\n`;
-      m3u8 += `/api/remux/hls/segment.ts?url=${encodeURIComponent(url)}&start=${start}&duration=${durationOfSegment}\n`;
-    }
-    m3u8 += '#EXT-X-ENDLIST\n';
-    res.send(m3u8);
-  } catch (e) {
-    console.error('[remux-hls] Error generating playlist, serving fallback 24m playlist:', e.message);
-    // Fallback: serve a static 24 minute playlist in case probing fails
-    const segmentDuration = 10;
-    const duration = 1440;
-    const numSegments = 144;
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    let m3u8 = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${segmentDuration}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
-    for (let i = 0; i < numSegments; i++) {
-      const start = i * segmentDuration;
-      m3u8 += `#EXTINF:${segmentDuration}.000,\n`;
-      m3u8 += `/api/remux/hls/segment.ts?url=${encodeURIComponent(url)}&start=${start}&duration=${segmentDuration}\n`;
-    }
-    m3u8 += '#EXT-X-ENDLIST\n';
-    res.send(m3u8);
+  if (fs.existsSync(playlistPath)) {
+    console.log(`[remux-local-hls] Serving cached playlist for ${hash}`);
+    return servePlaylist(playlistPath, hash, res);
   }
+
+  if (!fs.existsSync(outDir)) {
+    fs.mkdirSync(outDir, { recursive: true });
+  }
+
+  if (!activeRemuxes.has(hash)) {
+    console.log(`[remux-local-hls] Starting background FFmpeg for ${hash}`);
+    let ffmpegHeaders = '';
+    if (headers) {
+      try {
+        const headersObj = JSON.parse(headers);
+        for (const [key, value] of Object.entries(headersObj)) {
+          ffmpegHeaders += `${key}: ${value}\r\n`;
+        }
+      } catch (e) {
+        console.error('[remux-local-hls] Error parsing headers:', e.message);
+      }
+    }
+
+    const args = [];
+    if (ffmpegHeaders) {
+      args.push('-headers', ffmpegHeaders);
+    }
+    args.push(
+      '-i', url,
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-ac', '2',
+      '-map', '0:v:0',
+      '-map', '0:a:0',
+      '-f', 'hls',
+      '-hls_time', '10',
+      '-hls_playlist_type', 'event',
+      '-hls_segment_filename', path.join(outDir, 'seq_%d.ts'),
+      playlistPath
+    );
+
+    const ffmpegProcess = spawn('ffmpeg', args);
+    activeRemuxes.set(hash, ffmpegProcess);
+
+    ffmpegProcess.stderr.on('data', (data) => {
+      const line = data.toString();
+      if (line.includes('Error') || line.includes('HTTP error')) {
+        console.error(`[remux-local-hls] FFmpeg error ${hash}:`, line.trim());
+      }
+    });
+
+    ffmpegProcess.on('close', (code) => {
+      console.log(`[remux-local-hls] FFmpeg for ${hash} exited with code ${code}`);
+      activeRemuxes.delete(hash);
+    });
+
+    ffmpegProcess.on('error', (err) => {
+      console.error(`[remux-local-hls] FFmpeg process error ${hash}:`, err.message);
+      activeRemuxes.delete(hash);
+    });
+  }
+
+  let attempts = 0;
+  const checkInterval = setInterval(() => {
+    attempts++;
+    if (fs.existsSync(playlistPath)) {
+      clearInterval(checkInterval);
+      servePlaylist(playlistPath, hash, res);
+    } else if (attempts > 100) { // 10 seconds timeout
+      clearInterval(checkInterval);
+      res.status(500).send('Timeout waiting for playlist generation');
+    }
+  }, 100);
 });
 
-app.get('/api/remux/hls/segment.ts', (req, res) => {
-  const { url, start, duration } = req.query;
-  if (!url || start === undefined || duration === undefined) {
+function servePlaylist(playlistPath, hash, res) {
+  try {
+    let content = fs.readFileSync(playlistPath, 'utf8');
+    const updatedContent = content.replace(/(seq_\d+\.ts)/g, `/api/remux/hls/segment?hash=${hash}&file=$1`);
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(updatedContent);
+  } catch (e) {
+    res.status(500).send('Error reading playlist: ' + e.message);
+  }
+}
+
+app.get('/api/remux/hls/segment', (req, res) => {
+  const { hash, file } = req.query;
+  if (!hash || !file) {
     return res.status(400).send('Missing parameters');
   }
 
-  res.setHeader('Content-Type', 'video/mp2t');
+  const safeFile = path.basename(file);
+  const filePath = path.join('/tmp', 'hls_cache', hash, safeFile);
 
-  //ss before -i for super-fast keyframe seek, copy video, transcode audio to aac for browser compatibility
-  const ffmpeg = spawn('ffmpeg', [
-    '-ss', start,
-    '-i', url,
-    '-t', duration,
-    '-c:v', 'copy',
-    '-c:a', 'aac',
-    '-b:a', '128k',
-    '-ac', '2',
-    '-map', '0:v:0',
-    '-map', '0:a:0',
-    '-f', 'mpegts',
-    'pipe:1'
-  ]);
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Content-Type', 'video/mp2t');
+    return res.sendFile(filePath);
+  }
 
-  ffmpeg.stdout.pipe(res);
-
-  ffmpeg.on('error', (err) => {
-    console.error('[remux-hls] FFmpeg segment error:', err.message);
-  });
-
-  req.on('close', () => {
-    ffmpeg.kill('SIGKILL');
-  });
+  let attempts = 0;
+  const checkInterval = setInterval(() => {
+    attempts++;
+    if (fs.existsSync(filePath)) {
+      clearInterval(checkInterval);
+      res.setHeader('Content-Type', 'video/mp2t');
+      res.sendFile(filePath);
+    } else if (attempts > 150) { // 15 seconds timeout
+      clearInterval(checkInterval);
+      res.status(404).send('Segment not found');
+    }
+  }, 100);
 });
+
 
 const PORT = config.port;
 const HOST = process.env.BIND_HOST || '0.0.0.0';

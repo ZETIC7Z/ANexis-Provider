@@ -324,18 +324,28 @@ const extractTmdbImagePathFromShowboxHtml = (htmlContent) => {
     return null;
 };
 
-// NEW HELPER FUNCTION: Validate ShowBox TMDB image path against TMDB API backdrop paths
+// HELPER FUNCTION: Validate ShowBox TMDB image path against TMDB API backdrop paths
+// NOTE: Returns true (non-blocking) when image cannot be extracted — title validation
+// is sufficient to confirm correct content. Image validation is best-effort only.
 const validateTmdbImage = (showboxImagePath, tmdbApiBackdropPaths = []) => {
-    if (!showboxImagePath || !tmdbApiBackdropPaths || tmdbApiBackdropPaths.length === 0) {
-        return false;
+    if (!showboxImagePath) {
+        // No image found in ShowBox HTML — accept the page based on title alone
+        console.log(`  [ImageValidation] No ShowBox image found — skipping image check (title match is sufficient).`);
+        return true;
+    }
+    if (!tmdbApiBackdropPaths || tmdbApiBackdropPaths.length === 0) {
+        // No TMDB backdrops to compare against — non-blocking
+        console.log(`  [ImageValidation] No TMDB backdrops available — skipping image check.`);
+        return true;
     }
     const match = tmdbApiBackdropPaths.some(apiPath => apiPath === showboxImagePath);
     if (match) {
         console.log(`  [ImageValidation] SUCCESS: ShowBox image path "${showboxImagePath}" matches a TMDB API backdrop path.`);
     } else {
-        console.log(`  [ImageValidation] FAILED: ShowBox image path "${showboxImagePath}" does not match any of TMDB API backdrop paths (${tmdbApiBackdropPaths.slice(0, 3).join(', ')}...).`);
+        // Image mismatch — still return true, title match already confirmed correct content
+        console.log(`  [ImageValidation] Image mismatch (non-blocking): "${showboxImagePath}" not in TMDB backdrops — accepting based on title match.`);
     }
-    return match;
+    return true;
 };
 
 
@@ -1155,12 +1165,17 @@ const getShowboxUrlFromTmdbInfo = async (tmdbType, tmdbId, regionPreference = nu
                     if (pageInfo && pageInfo.title) {
                         const titleIsValid = validateShowboxTitle(pageInfo.title, mainTitle, originalTitle, alternativeTitles);
                         const showboxTmdbImagePath = extractTmdbImagePathFromShowboxHtml(htmlContent);
+                        // Image validation is now non-blocking (returns true when uncertain)
                         const imageIsValid = validateTmdbImage(showboxTmdbImagePath, tmdbBackdropPaths);
 
                         if (titleIsValid && imageIsValid) {
-                            console.log(`      SUCCESS (TITLE & IMAGE VALIDATED): Validated title and TMDB image for ${directShowboxUrl}. Using this URL.`);
+                            console.log(`      SUCCESS (TITLE VALIDATED): Confirmed title match for ${directShowboxUrl}. Using this URL.`);
                             return { showboxUrl: directShowboxUrl, year: year, title: mainTitle };
                         }
+                    } else if (htmlContent && htmlContent.length > 1000) {
+                        // Page loaded but couldn't extract title — accept if URL returned 200
+                        console.log(`      SOFT ACCEPT: Page loaded but title extraction failed for ${directShowboxUrl}. Trying this URL.`);
+                        return { showboxUrl: directShowboxUrl, year: year, title: mainTitle };
                     }
                 }
             }

@@ -14,6 +14,7 @@ COPY proxy ./proxy
 COPY public ./public
 COPY utils ./utils
 COPY README.md ./
+COPY test_providers_all.js ./
 
 # ---------- Runtime Stage ----------
 FROM node:20-alpine AS runtime
@@ -36,6 +37,7 @@ COPY --from=build /app/proxy ./proxy
 COPY --from=build /app/utils ./utils
 COPY --from=build /app/package.json ./
 COPY --from=build /app/README.md ./
+COPY --from=build /app/test_providers_all.js ./test_providers_all.js
 
 # Expose port
 EXPOSE 8787

@@ -5,7 +5,7 @@
   "febboxCookies": [
     "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3ODMxNjY3MTksIm5iZiI6MTc4MzE2NjcxOSwiZXhwIjoxODE0MjcwNzM5LCJkYXRhIjp7InVpZCI6MTIzODI3MSwidG9rZW4iOiJmNGY0ZWUzNmEzOWUwYzgxZDM3NDNlMmNjYmIxMDM4MSJ9fQ.XqqxlZRvT_5WRAzU3_LjhoUWls0kvCwFTkatkptD1w4"
   ],
-  "enableProxy": false,
+  "enableProxy": true,
   "disableCache": false,
   "disableUrlValidation": true,
   "disable4khdhubUrlValidation": false,
