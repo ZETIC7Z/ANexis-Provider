@@ -1506,17 +1506,10 @@ function processExtractorLink(link, resolve, linkNumber) {
 
 // Helper function to get TMDB details
 async function getTMDBDetails(tmdbId, mediaType) {
-    const { getTmdbApiKey } = require('../utils/tmdbKey');
-    const TMDB_API_KEY = getTmdbApiKey();
-    if (!TMDB_API_KEY) {
-        console.warn('[4KHDHub] TMDB API key missing; skipping TMDB metadata fetch');
-        return null;
-    }
-
+    const { getDetails } = require('../utils/tmdb');
     try {
         console.log(`[4KHDHub] Fetching ${mediaType} details for TMDB ID: ${tmdbId}`);
-        const response = await makeRequest(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}`);
-        const data = typeof response.body === 'string' ? JSON.parse(response.body) : response.body;
+        const data = await getDetails(mediaType === 'tv' ? 'tv' : 'movie', tmdbId);
 
         if (mediaType === 'movie') {
             return {

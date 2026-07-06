@@ -4,6 +4,7 @@
  */
 const axios = require('axios');
 const { getTmdbApiKey } = require('../utils/tmdbKey');
+const { getDetails } = require('../utils/tmdb');
 
 const API_BASE = 'https://nexus-anime-tau.vercel.app/api';
 
@@ -16,14 +17,9 @@ const AXIOS_OPTS = {
 
 // Get anime title from TMDB, ensuring it is classified as animation
 async function getTitleFromTmdb(tmdbId, mediaType) {
-    const key = getTmdbApiKey();
-    if (!key) return null;
     try {
         const type = mediaType === 'tv' ? 'tv' : 'movie';
-        const { data } = await axios.get(
-            `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${key}`,
-            { timeout: 8000 }
-        );
+        const data = await getDetails(type, tmdbId);
         
         // Ensure it is Animation (genre ID 16)
         const genres = data.genres || [];

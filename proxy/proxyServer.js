@@ -143,7 +143,11 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers) {
                     out.push(`${baseProxyUrl}/m3u8-proxy?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}`);
                 } else {
                     segmentUrls.push(abs);
-                    out.push(`${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}`);
+                    if (abs.includes('nekostream.site') || abs.includes('watching.onl')) {
+                        out.push(abs);
+                    } else {
+                        out.push(`${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}`);
+                    }
                 }
             } catch { out.push(line); }
         } else out.push(line);
@@ -172,7 +176,14 @@ function createProxyRoutes(app) {
             } catch {}
         }
         try {
-            const response = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+            const controller = new AbortController();
+            const fetchTimeout = setTimeout(() => controller.abort(), 15000);
+            let response;
+            try {
+                response = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers }, signal: controller.signal });
+            } finally {
+                clearTimeout(fetchTimeout);
+            }
             if (!response.ok) return res.status(response.status).json({ error: `M3U8 fetch failed: ${response.status}` });
             const text = await response.text();
             const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
@@ -183,6 +194,7 @@ function createProxyRoutes(app) {
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.send(rewritten);
         } catch (e) { res.status(500).json({ error: e.message }); }
+
     });
 
     // ts / key segment proxy

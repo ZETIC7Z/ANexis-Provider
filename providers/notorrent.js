@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { getTmdbApiKey } = require('../utils/tmdbKey');
+const { resolveImdbId } = require('../utils/tmdb');
 
 const NOTORRENT_API = 'https://addon-osvh.onrender.com';
 
@@ -29,11 +30,7 @@ async function getNotorrentStreams(tmdbId, mediaType = 'movie', seasonNum = null
     let imdbId;
     try {
         const type = mediaType === 'tv' ? 'tv' : 'movie';
-        const { data } = await axios.get(
-            `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${tmdbKey}&append_to_response=external_ids`,
-            { timeout: 8000 }
-        );
-        imdbId = (data.external_ids && data.external_ids.imdb_id) || null;
+        imdbId = await resolveImdbId(type, tmdbId);
     } catch (err) {
         console.error(`[NoTorrent] TMDB lookup failed: ${err.message}`);
         return [];

@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { getTmdbApiKey } = require('../utils/tmdbKey');
+const { getDetails, getSeasonDetails } = require('../utils/tmdb');
 
 const ANIKAI_BASE = 'https://anikai.watch';
 
@@ -10,14 +11,9 @@ const ANIKAI_HEADERS = {
 
 // Helper: Resolve title from TMDB
 async function getTitleFromTmdb(tmdbId, mediaType) {
-    const key = getTmdbApiKey();
-    if (!key) return null;
     try {
         const type = mediaType === 'tv' ? 'tv' : 'movie';
-        const { data } = await axios.get(
-            `https://api.themoviedb.org/3/${type}/${tmdbId}?api_key=${key}`,
-            { timeout: 8000 }
-        );
+        const data = await getDetails(type, tmdbId);
         return data.name || data.title || null;
     } catch {
         return null;
@@ -74,6 +70,25 @@ async function resolveDirectM3u8(playerUrl) {
     }
 }
 
+// Helper: Normalize string for comparison
+function normalize(str) {
+    if (!str) return '';
+    return str.toLowerCase()
+        .replace(/[^a-z0-9]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+// Helper: Resolve season name from TMDB
+async function getSeasonNameFromTmdb(tmdbId, seasonNum) {
+    try {
+        const data = await getSeasonDetails(tmdbId, seasonNum);
+        return data.name || null;
+    } catch {
+        return null;
+    }
+}
+
 async function getAnikaiStreams(tmdbId, mediaType = 'tv', seasonNum = null, episodeNum = null) {
     console.log(`[Anikai] Fetching for TMDB ${tmdbId} S${seasonNum}E${episodeNum} type=${mediaType}`);
     try {
@@ -90,14 +105,98 @@ async function getAnikaiStreams(tmdbId, mediaType = 'tv', seasonNum = null, epis
         
         // Find series or episode watch url matching title
         const searchRegex = /<article[^>]*>[\s\S]*?<a\s+href="([^"]+)"\s+itemprop="url"\s+title="([^"]+)"/gi;
+        const results = [];
         let match;
-        let bestMatchUrl = null;
         while ((match = searchRegex.exec(searchHtml)) !== null) {
-            const href = match[1];
-            const itemTitle = match[2];
-            if (itemTitle.toLowerCase().includes(title.toLowerCase()) || title.toLowerCase().includes(itemTitle.toLowerCase())) {
-                bestMatchUrl = href;
-                break;
+            results.push({
+                href: match[1],
+                title: match[2].trim()
+            });
+        }
+
+        let bestMatchUrl = null;
+        if (results.length > 0) {
+            // Fetch season name from TMDB if TV series
+            let seasonName = null;
+            if (mediaType === 'tv' && seasonNum) {
+                seasonName = await getSeasonNameFromTmdb(tmdbId, seasonNum);
+                console.log(`[Anikai] Resolved TMDB Season ${seasonNum} Name: "${seasonName}"`);
+            }
+
+            const targetTitle = title;
+            const normTarget = normalize(targetTitle);
+            const normSeasonName = seasonName ? normalize(seasonName) : '';
+
+            let bestScore = -1;
+            for (const item of results) {
+                const normItem = normalize(item.title);
+                let score = 0;
+
+                // 1. Contains main title
+                if (normItem.includes(normTarget)) {
+                    score += 10;
+                }
+
+                // 2. Exact match on main title (highly relevant for Season 1/no-season anime)
+                if (normItem === normTarget) {
+                    score += 30;
+                }
+
+                // 3. Season matching
+                if (mediaType === 'tv' && seasonNum) {
+                    // Check TMDB season name
+                    if (normSeasonName && normItem.includes(normSeasonName)) {
+                        score += 100;
+                    }
+                    
+                    // Check season number indicators (e.g. "season 2", "2nd season", "s2")
+                    const seasonIndicators = [
+                        `season ${seasonNum}`,
+                        `season${seasonNum}`,
+                        `${seasonNum}nd season`,
+                        `${seasonNum}rd season`,
+                        `${seasonNum}th season`,
+                        `${seasonNum}st season`
+                    ];
+                    
+                    if (seasonIndicators.some(ind => normItem.includes(ind))) {
+                        score += 50;
+                    }
+
+                    // S2 word boundaries check
+                    const sRegex = new RegExp(`\\bs${seasonNum}\\b`, 'i');
+                    if (sRegex.test(item.title)) {
+                        score += 50;
+                    }
+
+                    // Penalty for incorrect seasons
+                    for (let s = 1; s <= 10; s++) {
+                        if (s !== seasonNum) {
+                            const otherIndicators = [
+                                `season ${s}`,
+                                `season${s}`,
+                                `${s}nd season`,
+                                `${s}rd season`,
+                                `${s}th season`,
+                                `${s}st season`
+                            ];
+                            if (otherIndicators.some(ind => normItem.includes(ind))) {
+                                score -= 80;
+                            }
+                            const otherSRegex = new RegExp(`\\bs${s}\\b`, 'i');
+                            if (otherSRegex.test(item.title)) {
+                                score -= 80;
+                            }
+                        }
+                    }
+                }
+
+                console.log(`[Anikai] Candidate: "${item.title}" | Score: ${score} | URL: ${item.href}`);
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestMatchUrl = item.href;
+                }
             }
         }
 
@@ -123,7 +222,7 @@ async function getAnikaiStreams(tmdbId, mediaType = 'tv', seasonNum = null, epis
         let episodeUrl = bestMatchUrl;
         if (mediaType === 'tv') {
             const targetEpNum = episodeNum || 1;
-            const epRegex = new RegExp(`<a\\s+href="([^"]+)"[^>]*>\\s*<div\\s+class="epl-num"\\s*>\\s*${targetEpNum}\\s*<\\/div>`, 'i');
+            const epRegex = new RegExp(`<a\\s+href="([^"]+)"[^>]*>\\s*<div\\s+class="epl-num"[^>]*>\\s*${targetEpNum}\\s*<\\/div>`, 'i');
             const epMatch = seriesHtml.match(epRegex);
             if (epMatch) {
                 episodeUrl = epMatch[1];

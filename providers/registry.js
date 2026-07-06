@@ -14,14 +14,11 @@ const providerFunctionMap = {
   'notorrent.js': 'getNotorrentStreams',
   'dahmermovies.js': 'getDahmermoviesStreams',
   // New providers
-  'vsembed.js': 'getVsembedStreams',
   'anikoto.js': 'getAnikotoStreams',
-  'moviebox.js': 'getMovieboxStreams',
   'anikai.js': 'getAnikaiStreams',
   'videasy.js': 'getVideasyStreams',
-  'cinesrc.js': 'getCinesrcStreams',
   'vidcore.js': 'getVidcoreStreams',
-  'vidfast.js': 'getVidfastStreams',
+  'vidbox.js': 'getVidboxStreams',
 };
 
 // Stats for debug endpoint

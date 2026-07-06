@@ -1889,7 +1889,19 @@ const getStreamsFromTmdbId = async (tmdbType, tmdbId, seasonNum = null, episodeN
     console.log(`Getting streams for TMDB ${tmdbType}/${tmdbId}${seasonNum !== null ? `, Season ${seasonNum}` : ''}${episodeNum !== null ? `, Episode ${episodeNum}` : ''}`);
 
     // PRIMARY METHOD: Try PStream API first (if enabled)
+    // BUT skip PStream for anime (Animation genre) — PStream doesn't carry anime content
+    let isAnimeContent = false;
+    try {
+        const { getDetails } = require('../utils/tmdb');
+        if (typeof getDetails === 'function') {
+            const details = await getDetails(tmdbType, tmdbId);
+            if (details && details.genres) {
+                isAnimeContent = details.genres.some(g => g.id === 16); // 16 = Animation
+            }
+        }
+    } catch(e) { /* ignore, best-effort */ }
 
+    if (!isAnimeContent) {
     try {
         // Get TMDB data to extract IMDB ID
         const tmdbData = await getTmdbDataForPStream(tmdbType, tmdbId);
@@ -1929,6 +1941,10 @@ const getStreamsFromTmdbId = async (tmdbType, tmdbId, seasonNum = null, episodeN
     } catch (error) {
         console.error(`[PStream Primary] Error with PStream API: ${error.message}, falling back to FebBox`);
     }
+    } else {
+        console.log(`[PStream Skip] Anime content detected (genre=Animation), skipping PStream, going straight to FebBox`);
+    }
+
 
     // FALLBACK METHOD: Use original FebBox/ShowBox logic
     console.log(`[Fallback] Using FebBox/ShowBox method`);
@@ -2066,15 +2082,22 @@ const getStreamsFromTmdbId = async (tmdbType, tmdbId, seasonNum = null, episodeN
     // Sort streams by quality before returning
     const sortedStreams = sortStreamsByQuality(allStreams);
 
-    // Filter out 360p and 480p streams
-    const streamsToShowBoxFiltered = sortedStreams.filter(stream => {
+    // Filter out 360p and 480p streams ONLY if higher quality versions are available.
+    // For anime episodes that are only available in 360p/480p, keep all streams.
+    const hasHigherQuality = sortedStreams.some(stream => {
         const quality = stream.quality ? String(stream.quality).toLowerCase() : '';
-        if (quality === '360p' || quality === '480p') {
-            console.log(`  Filtering out potential ShowBox low-quality stream: ${stream.title} (${stream.quality})`);
-            return false;
-        }
-        return true;
+        return quality !== '360p' && quality !== '480p' && quality !== '' && quality !== 'unknown';
     });
+    const streamsToShowBoxFiltered = hasHigherQuality
+        ? sortedStreams.filter(stream => {
+            const quality = stream.quality ? String(stream.quality).toLowerCase() : '';
+            if (quality === '360p' || quality === '480p') {
+                console.log(`  Filtering out low-quality stream (higher quality available): ${stream.title} (${stream.quality})`);
+                return false;
+            }
+            return true;
+          })
+        : sortedStreams; // Keep all streams (including 360p/480p) if no higher quality exists
 
     // Apply size limit if not using a personal cookie
     let finalFilteredStreams = streamsToShowBoxFiltered;
@@ -2351,9 +2374,15 @@ const processShowWithSeasonsEpisodes = async (febboxUrl, showboxTitle, seasonNum
             // Recursive call with retry attempt to force fresh fetch
             return await processShowWithSeasonsEpisodes(febboxUrl, showboxTitle, seasonNum, episodeNum, resolveFids, regionPreference, userCookie, 1);
         } else {
-            console.log(`Could not find season ${seasonNum} folder in ${febboxUrl} even after fresh fetch. Aborting.`);
-            console.timeEnd(processTimerLabel);
-            return streamsForThisCall;
+            // Fallback: If only one folder exists, assume all episodes are inside it
+            if (folders.length === 1) {
+                selectedFolder = folders[0];
+                console.log(`[Showbox Fallback] Season ${seasonNum} folder not found, but only one folder ("${selectedFolder.name}") exists. Falling back to it.`);
+            } else {
+                console.log(`Could not find season ${seasonNum} folder in ${febboxUrl} even after fresh fetch. Aborting.`);
+                console.timeEnd(processTimerLabel);
+                return streamsForThisCall;
+            }
         }
     }
 

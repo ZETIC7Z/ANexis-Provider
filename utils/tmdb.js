@@ -20,20 +20,33 @@ async function tmdbFetchJson(url) {
 async function getExternalIds(type, tmdbId) {
   const key = `${type}:${tmdbId}`;
   const cached = cache.imdbByTmdb.get(key);
-  if (isFresh(cached)) return cached.data;
-  const json = await tmdbFetchJson(`https://api.themoviedb.org/3/${type}/${tmdbId}/external_ids`);
-  cache.imdbByTmdb.set(key, { data: json, ts: Date.now() });
-  return json;
+  if (isFresh(cached)) return await cached.promise;
+  
+  const promise = tmdbFetchJson(`https://api.themoviedb.org/3/${type}/${tmdbId}/external_ids`);
+  cache.imdbByTmdb.set(key, { promise, ts: Date.now() });
+  return await promise;
 }
 async function getDetails(type, tmdbId) {
   const key = `${type}:${tmdbId}:details`;
   const cached = cache.details.get(key);
-  if (isFresh(cached)) return cached.data;
-  const json = await tmdbFetchJson(`https://api.themoviedb.org/3/${type}/${tmdbId}`);
-  cache.details.set(key, { data: json, ts: Date.now() });
-  return json;
+  if (isFresh(cached)) return await cached.promise;
+  
+  const promise = tmdbFetchJson(`https://api.themoviedb.org/3/${type}/${tmdbId}`);
+  cache.details.set(key, { promise, ts: Date.now() });
+  return await promise;
 }
+
+async function getSeasonDetails(tmdbId, seasonNum) {
+  const key = `tv:${tmdbId}:season:${seasonNum}`;
+  const cached = cache.details.get(key);
+  if (isFresh(cached)) return await cached.promise;
+  
+  const promise = tmdbFetchJson(`https://api.themoviedb.org/3/tv/${tmdbId}/season/${seasonNum}`);
+  cache.details.set(key, { promise, ts: Date.now() });
+  return await promise;
+}
+
 async function resolveImdbId(type, tmdbId) {
   try { const ext = await getExternalIds(type, tmdbId); return ext.imdb_id || null; } catch { return null; }
 }
-module.exports = { getExternalIds, getDetails, resolveImdbId };
+module.exports = { getExternalIds, getDetails, getSeasonDetails, resolveImdbId };

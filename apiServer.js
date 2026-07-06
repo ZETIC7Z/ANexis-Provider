@@ -32,7 +32,7 @@ const { authenticate, issueSession, requireAuth, getSession, updatePassword } = 
 const path = require('path');
 const { listProviders, getProvider, getCookieStats } = require('./providers/registry');
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
-const { resolveImdbId } = require('./utils/tmdb');
+const { resolveImdbId, getDetails } = require('./utils/tmdb');
 const { applyFilters } = require('./utils/streamFilters');
 
 const app = express();
@@ -212,6 +212,44 @@ const metrics = {
   tmdbToImdbLookups: 0
 };
 
+// --- In-Memory Cache for /api/streams ---
+const streamsCache = new Map();
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+function getCacheKey(type, tmdbId, season, episode) {
+  return `${type}-${tmdbId}-${season || 'x'}-${episode || 'x'}`;
+}
+
+function cleanCache() {
+  const now = Date.now();
+  for (const [key, entry] of streamsCache.entries()) {
+    if (now - entry.timestamp > CACHE_TTL_MS) {
+      streamsCache.delete(key);
+    }
+  }
+}
+setInterval(cleanCache, 15 * 60 * 1000).unref();
+
+function timeoutPromise(ms, promise, providerName) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      console.warn(`[api] timeout of ${ms}ms exceeded for provider ${providerName}`);
+      resolve([]); 
+    }, ms);
+    promise
+      .then(res => {
+        clearTimeout(timer);
+        resolve(res);
+      })
+      .catch(err => {
+        clearTimeout(timer);
+        console.error(`[api] provider ${providerName} failed:`, err.message);
+        resolve([]); 
+      });
+  });
+}
+
+
 app.use((req,res,next)=>{ metrics.requestsTotal++; metrics.lastRequestAt = Date.now(); next(); });
 // Serve static UI (login page at /)
 app.use(express.static(path.join(process.cwd(),'public')));
@@ -351,30 +389,53 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
   if (!['movie','series'].includes(type)) return res.status(400).json({ success:false, error:'INVALID_TYPE' });
   const season = req.query.season ? Number(req.query.season) : null;
   const episode = req.query.episode ? Number(req.query.episode) : null;
+  // Accept imdbId from NEXUS frontend to skip the TMDB→IMDB lookup
+  const clientImdbId = typeof req.query.imdbId === 'string' && req.query.imdbId.startsWith('tt') ? req.query.imdbId : null;
   try {
-    metrics.streamRequests++;
-    const tmdbType = type === 'movie' ? 'movie' : 'tv';
-    const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
-    const selectedProviders = (config.defaultProviders.length ? config.defaultProviders : listProviders().map(p=>p.name));
-    const providerTimings = {};
-    const results = await Promise.all(selectedProviders.map(async name => {
-      const prov = getProvider(name);
-      if (!prov || !prov.enabled) return [];
-      metrics.providerCalls[name] = (metrics.providerCalls[name]||0)+1;
-      try {
+    const cacheKey = getCacheKey(type, tmdbId, season, episode);
+    const cached = streamsCache.get(cacheKey);
+    let streams = [];
+    let providerTimings = {};
+    let imdbId = null;
+
+    if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
+      metrics.streamRequests++;
+      console.log(`[api] Returning CACHED streams for ${cacheKey}`);
+      streams = cached.rawStreams;
+      providerTimings = cached.providerTimings;
+      imdbId = cached.imdbId;
+    } else {
+      const tmdbType = type === 'movie' ? 'movie' : 'tv';
+      // Start anime check in parallel
+      const isAnimePromise = getDetails(tmdbType, tmdbId).then(details => {
+        return details && details.genres ? details.genres.some(g => g.id === 16) : false;
+      }).catch(() => false);
+
+      // Use client-supplied imdbId if available, otherwise resolve from TMDB
+      if (clientImdbId) {
+        imdbId = clientImdbId;
+        console.log(`[api] Using client-supplied imdbId: ${imdbId} (skipped TMDB lookup)`);
+      } else {
+        imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
+      }
+      const selectedProviders = (config.defaultProviders.length ? config.defaultProviders : listProviders().map(p=>p.name));
+      const results = await Promise.all(selectedProviders.map(async name => {
+        const prov = getProvider(name);
+        if (!prov || !prov.enabled) return [];
+        metrics.providerCalls[name] = (metrics.providerCalls[name]||0)+1;
         console.log(`[api] invoking provider ${name} for tmdbId=${tmdbId}`);
         const t0 = Date.now();
-        const r = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } });
+        // 12 second strict timeout per provider
+        const r = await timeoutPromise(12000, prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } }), name);
         providerTimings[name] = Date.now()-t0;
         console.log(`[api] provider ${name} returned ${Array.isArray(r)?r.length:0} streams`);
         return r;
-      } catch (e) {
-        console.error(`[api] provider ${name} failed:`, e.message);
-        providerTimings[name] = null;
-        return [];
-      }
-    }));
-    let streams = results.flat();
+      }));
+      streams = results.flat();
+      const isAnimeResult = await isAnimePromise;
+      streamsCache.set(cacheKey, { timestamp: Date.now(), rawStreams: streams, providerTimings, imdbId, isAnime: isAnimeResult });
+    }
+
     streams = applyFilters(streams, 'aggregate', config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
     const serverUrl = `${req.protocol}://${req.get('host')}`;
@@ -383,7 +444,15 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       // Omit original headers when proxying to avoid leaking upstream requirements
       streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
     }
-    res.json({ success:true, tmdbId, imdbId, count: streams.length, providerTimings, streams });
+
+    let isAnime = false;
+    if (cached && cached.isAnime !== undefined) {
+      isAnime = cached.isAnime;
+    } else {
+      isAnime = streamsCache.get(cacheKey)?.isAnime || false;
+    }
+
+    res.json({ success:true, tmdbId, imdbId, count: streams.length, providerTimings, streams, isAnime });
   } catch (e) {
     metrics.lastError = e.message;
     res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message });
@@ -421,187 +490,7 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
   }
 });
 
-// On-the-fly remuxer using FFmpeg to play MKV files as HLS on web players
-const { spawn } = require('child_process');
 
-function getDuration(url, headersObj = {}) {
-  return new Promise((resolve, reject) => {
-    let headersStr = '';
-    for (const [key, value] of Object.entries(headersObj)) {
-      headersStr += `${key}: ${value}\r\n`;
-    }
-
-    const args = [
-      '-v', 'error',
-      '-show_entries', 'format=duration',
-      '-of', 'default=noprint_wrappers=1:nokey=1'
-    ];
-
-    if (headersStr) {
-      args.push('-headers', headersStr);
-    }
-    args.push(url);
-
-    const ffprobe = spawn('ffprobe', args);
-    let output = '';
-    ffprobe.stdout.on('data', data => { output += data.toString(); });
-    ffprobe.on('error', err => { reject(err); });
-    ffprobe.on('close', code => {
-      if (code === 0) {
-        resolve(parseFloat(output.trim()) || 1440); // default to 24 mins if NaN
-      } else {
-        reject(new Error(`ffprobe exited with code ${code}`));
-      }
-    });
-  });
-}
-
-const fs = require('fs');
-const crypto = require('crypto');
-const activeRemuxes = new Map();
-
-// Cleanup old cache folders periodically
-setInterval(() => {
-  const cacheRoot = '/tmp/hls_cache';
-  if (!fs.existsSync(cacheRoot)) return;
-  fs.readdirSync(cacheRoot).forEach(dir => {
-    const dirPath = path.join(cacheRoot, dir);
-    try {
-      const stats = fs.statSync(dirPath);
-      if (Date.now() - stats.mtimeMs > 2 * 60 * 60 * 1000) {
-        fs.rmSync(dirPath, { recursive: true, force: true });
-        console.log(`[remux-local-hls] Cleaned up expired cache: ${dir}`);
-      }
-    } catch (e) {
-      console.error(`[remux-local-hls] Error cleaning ${dir}:`, e.message);
-    }
-  });
-}, 30 * 60 * 1000);
-
-app.get('/api/remux/hls/index.m3u8', async (req, res) => {
-  const url = req.query.url;
-  if (!url) return res.status(400).send('Missing url parameter');
-
-  const headers = req.query.headers || '';
-  const hash = crypto.createHash('md5').update(url).digest('hex');
-  const outDir = path.join('/tmp', 'hls_cache', hash);
-  const playlistPath = path.join(outDir, 'index.m3u8');
-
-  if (fs.existsSync(playlistPath)) {
-    console.log(`[remux-local-hls] Serving cached playlist for ${hash}`);
-    return servePlaylist(playlistPath, hash, res);
-  }
-
-  if (!fs.existsSync(outDir)) {
-    fs.mkdirSync(outDir, { recursive: true });
-  }
-
-  if (!activeRemuxes.has(hash)) {
-    console.log(`[remux-local-hls] Starting background FFmpeg for ${hash}`);
-    let ffmpegHeaders = '';
-    if (headers) {
-      try {
-        const headersObj = JSON.parse(headers);
-        for (const [key, value] of Object.entries(headersObj)) {
-          ffmpegHeaders += `${key}: ${value}\r\n`;
-        }
-      } catch (e) {
-        console.error('[remux-local-hls] Error parsing headers:', e.message);
-      }
-    }
-
-    const args = [];
-    if (ffmpegHeaders) {
-      args.push('-headers', ffmpegHeaders);
-    }
-    args.push(
-      '-i', url,
-      '-c:v', 'copy',
-      '-c:a', 'aac',
-      '-b:a', '128k',
-      '-ac', '2',
-      '-map', '0:v:0',
-      '-map', '0:a:0',
-      '-f', 'hls',
-      '-hls_time', '10',
-      '-hls_playlist_type', 'event',
-      '-hls_segment_filename', path.join(outDir, 'seq_%d.ts'),
-      playlistPath
-    );
-
-    const ffmpegProcess = spawn('ffmpeg', args);
-    activeRemuxes.set(hash, ffmpegProcess);
-
-    ffmpegProcess.stderr.on('data', (data) => {
-      const line = data.toString();
-      if (line.includes('Error') || line.includes('HTTP error')) {
-        console.error(`[remux-local-hls] FFmpeg error ${hash}:`, line.trim());
-      }
-    });
-
-    ffmpegProcess.on('close', (code) => {
-      console.log(`[remux-local-hls] FFmpeg for ${hash} exited with code ${code}`);
-      activeRemuxes.delete(hash);
-    });
-
-    ffmpegProcess.on('error', (err) => {
-      console.error(`[remux-local-hls] FFmpeg process error ${hash}:`, err.message);
-      activeRemuxes.delete(hash);
-    });
-  }
-
-  let attempts = 0;
-  const checkInterval = setInterval(() => {
-    attempts++;
-    if (fs.existsSync(playlistPath)) {
-      clearInterval(checkInterval);
-      servePlaylist(playlistPath, hash, res);
-    } else if (attempts > 100) { // 10 seconds timeout
-      clearInterval(checkInterval);
-      res.status(500).send('Timeout waiting for playlist generation');
-    }
-  }, 100);
-});
-
-function servePlaylist(playlistPath, hash, res) {
-  try {
-    let content = fs.readFileSync(playlistPath, 'utf8');
-    const updatedContent = content.replace(/(seq_\d+\.ts)/g, `/api/remux/hls/segment?hash=${hash}&file=$1`);
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.send(updatedContent);
-  } catch (e) {
-    res.status(500).send('Error reading playlist: ' + e.message);
-  }
-}
-
-app.get('/api/remux/hls/segment', (req, res) => {
-  const { hash, file } = req.query;
-  if (!hash || !file) {
-    return res.status(400).send('Missing parameters');
-  }
-
-  const safeFile = path.basename(file);
-  const filePath = path.join('/tmp', 'hls_cache', hash, safeFile);
-
-  if (fs.existsSync(filePath)) {
-    res.setHeader('Content-Type', 'video/mp2t');
-    return res.sendFile(filePath);
-  }
-
-  let attempts = 0;
-  const checkInterval = setInterval(() => {
-    attempts++;
-    if (fs.existsSync(filePath)) {
-      clearInterval(checkInterval);
-      res.setHeader('Content-Type', 'video/mp2t');
-      res.sendFile(filePath);
-    } else if (attempts > 150) { // 15 seconds timeout
-      clearInterval(checkInterval);
-      res.status(404).send('Segment not found');
-    }
-  }, 100);
-});
 
 
 const PORT = config.port;

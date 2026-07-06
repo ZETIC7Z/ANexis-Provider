@@ -11,8 +11,9 @@ const API_BASE = "https://enc-dec.app/api";
 async function getVidcoreStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     console.log(`[Vidcore] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
 
+    const isTv = mediaType === 'tv' || mediaType === 'series';
     // Construct URL
-    const baseUrl = mediaType === 'tv'
+    const baseUrl = isTv
         ? `https://vidcore.net/tv/${tmdbId}/${seasonNum}/${episodeNum}/`
         : `https://vidcore.net/movie/${tmdbId}/`;
 

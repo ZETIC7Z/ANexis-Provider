@@ -1,13 +1,13 @@
-const { getVsembedStreams } = require('./providers/vsembed');
-const { getMovieboxStreams } = require('./providers/moviebox');
+const { getAnikaiStreams } = require('./providers/anikai');
+const { getAnikotoStreams } = require('./providers/anikoto');
 
 async function run() {
-    console.log("Testing Vsembed...");
-    const vs = await getVsembedStreams('550'); // Fight Club
-    console.log("Vsembed result:", JSON.stringify(vs, null, 2));
+    console.log("Testing Anikai...");
+    const ani = await getAnikaiStreams('37854', 'tv', 23, 1165); // One Piece
+    console.log("Anikai result:", JSON.stringify(ani, null, 2));
 
-    console.log("Testing Moviebox...");
-    const mb = await getMovieboxStreams('550');
-    console.log("Moviebox result:", JSON.stringify(mb, null, 2));
+    console.log("\nTesting Anikoto...");
+    const ak = await getAnikotoStreams('37854', 'tv', 23, 1165);
+    console.log("Anikoto result:", JSON.stringify(ak, null, 2));
 }
 run();
