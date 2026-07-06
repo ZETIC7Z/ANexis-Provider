@@ -425,8 +425,8 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
         metrics.providerCalls[name] = (metrics.providerCalls[name]||0)+1;
         console.log(`[api] invoking provider ${name} for tmdbId=${tmdbId}`);
         const t0 = Date.now();
-        // 12 second strict timeout per provider
-        const r = await timeoutPromise(12000, prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } }), name);
+        // 20 second strict timeout per provider to allow for cold starts / cloud latency
+        const r = await timeoutPromise(20000, prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } }), name);
         providerTimings[name] = Date.now()-t0;
         console.log(`[api] provider ${name} returned ${Array.isArray(r)?r.length:0} streams`);
         return r;
