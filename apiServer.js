@@ -113,6 +113,11 @@ setImmediate(()=>console.log('[diagnostic] post-start setImmediate fired'));
 app.use(cors());
 app.use(express.json());
 
+// Health Check Route
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', time: new Date().toISOString() });
+});
+
 // --- Auth Routes (login before static serving) ---
 app.post('/auth/login', (req,res) => {
   const { username, password } = req.body || {};

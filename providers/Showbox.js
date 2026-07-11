@@ -1172,9 +1172,9 @@ const getShowboxUrlFromTmdbInfo = async (tmdbType, tmdbId, regionPreference = nu
                             console.log(`      SUCCESS (TITLE VALIDATED): Confirmed title match for ${directShowboxUrl}. Using this URL.`);
                             return { showboxUrl: directShowboxUrl, year: year, title: mainTitle };
                         }
-                    } else if (htmlContent && htmlContent.length > 1000) {
-                        // Page loaded but couldn't extract title — accept if URL returned 200
-                        console.log(`      SOFT ACCEPT: Page loaded but title extraction failed for ${directShowboxUrl}. Trying this URL.`);
+                    } else if (pageInfo && pageInfo.id && pageInfo.type && htmlContent && htmlContent.length > 1000) {
+                        // Page loaded with valid ID/type but title extraction failed
+                        console.log(`      SOFT ACCEPT: Page loaded with valid ID/type but title extraction failed for ${directShowboxUrl}. Trying this URL.`);
                         return { showboxUrl: directShowboxUrl, year: year, title: mainTitle };
                     }
                 }
